@@ -1,6 +1,6 @@
 const assert = require('assert');
-const mysql2 = require('mysql2/promise');
-const { Manager } = require('node-norm');
+const query = require('../_lib/query')();
+const createManager = require('../_lib/manager');
 const Big = require('big.js');
 const {
   NBig,
@@ -13,59 +13,42 @@ const {
   NString,
 } = require('node-norm/schemas');
 
-const config = {
-  adapter: require('..'),
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_DATABASE || 'testing',
-  schemas: [
-    {
-      name: 'foo',
-      fields: [
-        new NBig('nbig'),
-        new NBoolean('nboolean'),
-        new NDatetime('ndatetime'),
-        new NDouble('ndouble'),
-        new NInteger('ninteger'),
-        new NList('nlist'),
-        new NMap('nmap'),
-        new NString('nstring'),
-      ],
-    },
+const SCHEMAS = [{
+  name: 'foo',
+  fields: [
+    new NBig('nbig'),
+    new NBoolean('nboolean'),
+    new NDatetime('ndatetime'),
+    new NDouble('ndouble'),
+    new NInteger('ninteger'),
+    new NList('nlist'),
+    new NMap('nmap'),
+    new NString('nstring'),
   ],
-};
-
-async function query (sql, params) {
-  let { host, user, password, database } = config;
-  let conn = await mysql2.createConnection({ host, user, password, database });
-  let [ results, fields ] = await conn.query(sql, params);
-  await conn.end();
-  return { results, fields };
-}
+}];
 
 describe('cases with schema', () => {
   beforeEach(async () => {
     await query('DROP TABLE IF EXISTS foo');
     await query(`
-CREATE TABLE foo (
-  id INT AUTO_INCREMENT,
-  nbig VARCHAR(100),
-  nboolean INT,
-  ndatetime DATETIME,
-  ndouble DOUBLE,
-  ninteger INT,
-  nlist TEXT,
-  nmap TEXT,
-  nstring VARCHAR(100),
-  nfield VARCHAR(100),
-  PRIMARY KEY (id)
-)
+      CREATE TABLE foo (
+        id INT AUTO_INCREMENT,
+        nbig VARCHAR(100),
+        nboolean INT,
+        ndatetime DATETIME,
+        ndouble DOUBLE,
+        ninteger INT,
+        nlist TEXT,
+        nmap TEXT,
+        nstring VARCHAR(100),
+        nfield VARCHAR(100),
+        PRIMARY KEY (id)
+      )
     `);
     await query(
       `
-INSERT INTO foo (nbig, nboolean, ndatetime, ndouble, ninteger, nlist, nmap, nstring, nfield)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
+        INSERT INTO foo (nbig, nboolean, ndatetime, ndouble, ninteger, nlist, nmap, nstring, nfield)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
       `,
       [
         '123.456',
@@ -77,24 +60,24 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
         '{"foo":"bar"}',
         'foobar',
         'custom-field',
-      ]
+      ],
     );
   });
 
-  afterEach(async () => {
-    await query('DROP TABLE foo');
-  });
+  // afterEach(async () => {
+  //   await query('DROP TABLE foo');
+  // });
 
   it('create new record', async () => {
-    let manager = new Manager({ connections: [ config ] });
+    const manager = createManager({ schemas: SCHEMAS });
 
     try {
       await manager.runSession(async session => {
-        let { affected, rows } = await session.factory('foo')
+        const { affected, rows } = await session.factory('foo')
           .insert({
             nbig: 12.34,
             nboolean: '',
-            ndatetime: new Date(),
+            ndatetime: new Date('2019-02-06T00:00:00.000Z'),
             ndouble: 1.234,
             ninteger: 1234,
             nlist: ['foo', 'bar'],
@@ -108,7 +91,29 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
         assert.strictEqual(rows.length, 1);
       });
 
-      let { results } = await query('SELECT * from foo');
+      const { results } = await query('SELECT * from foo');
+      assert.strictEqual(results.length, 2);
+    } finally {
+      await manager.end();
+    }
+  });
+
+  it('create new record with default empty columns', async () => {
+    const manager = createManager({ schemas: SCHEMAS });
+
+    try {
+      await manager.runSession(async session => {
+        const { affected, rows } = await session.factory('foo')
+          .insert({
+            nbig: 12.34,
+          })
+          .save();
+
+        assert.strictEqual(affected, 1);
+        assert.strictEqual(rows.length, 1);
+      });
+
+      const { results } = await query('SELECT * from foo');
       assert.strictEqual(results.length, 2);
     } finally {
       await manager.end();
@@ -116,10 +121,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
   });
 
   it('read record', async () => {
-    let manager = new Manager({ connections: [ config ] });
+    const manager = createManager({ schemas: SCHEMAS });
     try {
       await manager.runSession(async session => {
-        let foos = await session.factory('foo').all();
+        const foos = await session.factory('foo').all();
         assert.strictEqual(foos.length, 1);
         assert(foos[0].nbig instanceof Big);
         assert.strictEqual(foos[0].nboolean, true);
@@ -136,10 +141,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
   });
 
   it('update record', async () => {
-    let manager = new Manager({ connections: [ config ] });
+    const manager = createManager({ schemas: SCHEMAS });
     try {
       await manager.runSession(async session => {
-        let { affected } = await session.factory('foo', 1).set({
+        const { affected } = await session.factory('foo', 1).set({
           nbig: 12.34,
           nboolean: false,
           ndatetime: new Date('2018-11-21 00:00:00'),
@@ -153,7 +158,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ? )
         assert.strictEqual(affected, 1);
       });
 
-      let { results } = await query('SELECT * FROM foo WHERE id = 1');
+      const { results } = await query('SELECT * FROM foo WHERE id = 1');
       assert.strictEqual(results.length, 1);
       assert.strictEqual(results[0].nbig, '12.34');
       assert.strictEqual(results[0].nboolean, 0);
