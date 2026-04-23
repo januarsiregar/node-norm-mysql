@@ -28,6 +28,13 @@ const DEFAULT_TYPES = {
 
 const FALLBACK_TYPE = 'VARCHAR(255)';
 
+const FATAL_ERROR_CODES = new Set([
+  'PROTOCOL_CONNECTION_LOST',
+  'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR',
+  'ECONNRESET',
+  'ER_CLIENT_INTERACTION_TIMEOUT',
+]);
+
 class Mysql extends Connection {
   constructor (options) {
     super(options);
@@ -54,6 +61,8 @@ class Mysql extends Connection {
       const { host, user, password, database } = this;
       this.connPromise = mysql2.createConnection({ host, user, password, database, enableKeepAlive: true });
       this.connPromise.then(conn => conn.on('error', this.dbOnError.bind(this)));
+      this.connBroken = false;
+      this.lastFatalError = undefined;
     }
 
     return this.connPromise;
@@ -63,11 +72,17 @@ class Mysql extends Connection {
   dbOnError (err) {
     debug('Database error', err);
 
-    // Connection to the MySQL server is usually
-    // lost due to either server restart
-    if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-      this.connPromise = undefined;
-      console.error('Connection already ended, will be reinstantiate for next query');
+    // Fatal error means the connection is no longer usable
+    // (server restart, wait_timeout expired, socket reset, etc).
+    // Remember it so rawQuery can react appropriately — outside a
+    // transaction we also eagerly drop the cached promise.
+    if (err.fatal) {
+      this.connBroken = true;
+      this.lastFatalError = err;
+      if (!this.inTransaction) {
+        this.connPromise = undefined;
+      }
+      console.error('Connection no longer usable', err.code);
       return;
     }
 
@@ -78,9 +93,36 @@ class Mysql extends Connection {
     debugQuery('SQL %s', sql);
     debugQuery('??? %o', params);
 
-    const conn = await this.getRaw();
-    const [result, fields] = await conn.execute(sql, params);
-    return { result, fields };
+    try {
+      const conn = await this.getRaw();
+      const [result, fields] = await conn.execute(sql, params);
+      return { result, fields };
+    } catch (err) {
+      const isConnectionDead = err.fatal || this.connBroken || FATAL_ERROR_CODES.has(err.code);
+      if (!isConnectionDead) {
+        throw err;
+      }
+
+      // Prefer the original fatal error from dbOnError (e.g.
+      // PROTOCOL_CONNECTION_LOST) over a downstream "closed state" error.
+      const fatalErr = this.lastFatalError || err;
+      this.connPromise = undefined;
+      this.connBroken = false;
+      this.lastFatalError = undefined;
+
+      // Inside a transaction the server-side state is gone — retrying on a
+      // fresh connection would silently drop the BEGIN, so surface the error
+      // and let the caller rollback/retry the whole transaction.
+      if (this.inTransaction) {
+        this.inTransaction = false;
+        throw fatalErr;
+      }
+
+      debug('Retrying query with fresh connection after fatal error', fatalErr.code);
+      const conn = await this.getRaw();
+      const [result, fields] = await conn.execute(sql, params);
+      return { result, fields };
+    }
   }
 
   getFieldNamesFromSchemaOrRow (query) {
@@ -294,16 +336,19 @@ class Mysql extends Connection {
   async _begin () {
     const conn = await this.getRaw();
     await conn.beginTransaction();
+    this.inTransaction = true;
   }
 
   async _commit () {
     const conn = await this.getRaw();
     await conn.commit();
+    this.inTransaction = false;
   }
 
   async _rollback () {
     const conn = await this.getRaw();
     await conn.rollback();
+    this.inTransaction = false;
   }
 
   async count (query, useSkipAndLimit = false) {

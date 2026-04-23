@@ -1,6 +1,6 @@
 {
   "name": "node-norm-mysql",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Mysql adapter for norm",
   "main": "index.js",
   "scripts": {

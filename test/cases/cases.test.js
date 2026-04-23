@@ -158,4 +158,18 @@ describe('cases', () => {
       await manager.end();
     }
   });
+
+  it('read record sorted by id desc', async () => {
+    const manager = createManager();
+    try {
+      await manager.runSession(async session => {
+        const data = await session.factory('foo').sort({ id: -1 }).all();
+        assert.strictEqual(data.length, 6);
+        assert.strictEqual(data[0].id, 6);
+        assert.strictEqual(data[5].id, 1);
+      });
+    } finally {
+      await manager.end();
+    }
+  });
 });
